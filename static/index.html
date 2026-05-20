@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SOP Generator — ZV</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <div class="app-header">
+    <div class="app-header-left">
+      <span class="app-title">ZV SOP Generator</span>
+    </div>
+    <div class="app-header-right">
+      <span class="sop-id-badge" id="sop-id-badge">---</span>
+    </div>
+  </div>
+
+  <!-- Split pane -->
+  <div class="split-pane">
+
+    <!-- LEFT: Input form -->
+    <div class="pane pane-left">
+
+      <div class="form-section">
+        <h3>Metadata</h3>
+        <div class="form-row">
+          <label class="form-label">
+            SOP Title
+            <input type="text" id="sop-title" placeholder="Descriptive title (auto-prefixed with [SOP])">
+          </label>
+        </div>
+        <div class="form-grid-3">
+          <label class="form-label">
+            Author
+            <select id="author"></select>
+          </label>
+          <label class="form-label">
+            Approver
+            <select id="approver"></select>
+          </label>
+          <label class="form-label">
+            Owner
+            <select id="owner"></select>
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label class="form-label">
+            Tools Required
+            <input type="text" id="tools-required" placeholder="Asana, Claude Code, ...">
+          </label>
+          <label class="form-label">
+            Status
+            <select id="status"></select>
+          </label>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <h3>Raw Input</h3>
+        <textarea id="raw-text" rows="10" placeholder="Paste transcripts, notes, or process descriptions here..."></textarea>
+      </div>
+
+      <div class="form-section">
+        <h3>Upload Files</h3>
+        <div class="drop-zone" id="drop-zone">
+          <span class="drop-zone-text">Drop .txt, .md, or .pdf files here, or click to browse</span>
+          <input type="file" id="file-input" multiple accept=".txt,.md,.pdf" hidden>
+        </div>
+        <div class="file-chips" id="file-list"></div>
+      </div>
+
+      <div class="form-section">
+        <h3>Loom Videos</h3>
+        <div id="loom-fields"></div>
+        <div class="loom-actions">
+          <button class="btn btn-sm" data-action="add-loom-field">+ Add URL</button>
+          <button class="btn btn-sm btn-accent" data-action="fetch-all-loom">Fetch Transcripts</button>
+        </div>
+      </div>
+
+      <button class="btn btn-accent btn-large" data-action="prefill-fields" id="prefill-btn">
+        Pre-fill Metadata from Input
+      </button>
+
+      <button class="btn btn-primary btn-large" data-action="generate-sop" id="generate-btn">
+        Generate SOP
+      </button>
+
+    </div>
+
+    <!-- RIGHT: Preview + Actions -->
+    <div class="pane pane-right">
+      <div class="preview-toolbar">
+        <button class="btn btn-sm" data-action="download-md" id="btn-dl-md" disabled>Download .md</button>
+        <button class="btn btn-sm" data-action="download-pdf" id="btn-dl-pdf" disabled>Download .pdf</button>
+        <label class="toolbar-checkbox" title="Page will not be visible until promoted from draft">
+          <input type="checkbox" id="publish-as-draft" checked>
+          Draft
+        </label>
+        <button class="btn btn-sm btn-primary" data-action="publish" id="btn-publish" disabled>Publish to Confluence</button>
+      </div>
+      <div class="preview-container" id="preview-container">
+        <div class="preview-placeholder">
+          <p>Generate an SOP to see the preview here.</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Publish confirmation modal -->
+<div class="modal-overlay" id="publish-modal">
+  <div class="modal">
+    <h3>Publish to Confluence</h3>
+    <p class="modal-subtitle">Target: ZV Confluence</p>
+    <label class="form-label">
+      Parent Folder
+      <select id="parent-folder"></select>
+    </label>
+    <div class="modal-actions">
+      <button class="btn" data-action="cancel-publish">Cancel</button>
+      <button class="btn btn-primary" data-action="confirm-publish">Publish</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

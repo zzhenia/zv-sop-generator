@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+anthropic
+requests
+python-multipart
+weasyprint
+pdfplumber
