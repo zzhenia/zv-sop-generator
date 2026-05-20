@@ -113,12 +113,12 @@ def _query_next_sop_id():
         )
         if pr.ok:
             body = pr.json().get("body", {}).get("storage", {}).get("value", "")
-            m = re.search(r"PI-SOP-(\d+)", body)
+            m = re.search(r"ZV-SOP-(\d+)", body)
             if m:
                 ids.append(int(m.group(1)))
 
     next_num = max(ids) + 1 if ids else 1
-    result = f"PI-SOP-{next_num:03d}"
+    result = f"ZV-SOP-{next_num:03d}"
     _next_id_cache["value"] = result
     _next_id_cache["expires"] = now + 300  # 5 min cache
     return result
