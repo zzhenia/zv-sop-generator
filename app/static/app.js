@@ -40,33 +40,25 @@ async function init() {
     return;
   }
 
-  // Populate dropdowns
-  populateSelect('author', config.users, 'key', 'display');
-  populateSelect('approver', config.users, 'key', 'display');
-  populateSelect('owner', config.users, 'key', 'display');
+  // Apply branding
+  applyBranding(config);
+
+  // Populate user datalists
+  populateDatalist('author-list', config.users);
+  populateDatalist('approver-list', config.users);
+  populateDatalist('owner-list', config.users);
+
+  // Populate status dropdown
   populateSelect('status', config.statuses.map(s => ({ key: s, display: s })), 'key', 'display');
   document.getElementById('status').value = 'DRAFT';
 
-  // Populate parent folders from Confluence tree
-  try {
-    const folders = await api('GET', '/api/folders');
-    const folderSelect = document.getElementById('parent-folder');
-    folderSelect.innerHTML = '<option value="">-- Select folder --</option>';
-    for (const f of folders) {
-      const opt = document.createElement('option');
-      opt.value = f.id;
-      opt.textContent = f.label;
-      folderSelect.appendChild(opt);
-    }
-  } catch (e) {
-    // Fall back to config folders
-    const folderSelect = document.getElementById('parent-folder');
-    for (const [label, id] of Object.entries(config.parent_folders)) {
-      const opt = document.createElement('option');
-      opt.value = id;
-      opt.textContent = label;
-      folderSelect.appendChild(opt);
-    }
+  // Populate parent folders in publish modal
+  const folderSelect = document.getElementById('parent-folder');
+  for (const [label, id] of Object.entries(config.parent_folders)) {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = label;
+    folderSelect.appendChild(opt);
   }
 
   // Fetch next SOP ID
@@ -94,6 +86,43 @@ function populateSelect(id, items, valueKey, labelKey) {
     opt.textContent = typeof item === 'object' ? item[labelKey] : item;
     select.appendChild(opt);
   }
+}
+
+function populateDatalist(datalistId, users) {
+  const dl = document.getElementById(datalistId);
+  dl.innerHTML = '';
+  for (const user of users) {
+    const opt = document.createElement('option');
+    opt.value = user.display;
+    dl.appendChild(opt);
+  }
+}
+
+function applyBranding(config) {
+  const brand = config.brand || {};
+
+  // Header background
+  const header = document.getElementById('app-header');
+  if (brand.header_color) header.style.background = brand.header_color;
+
+  // Logo
+  const logo = document.getElementById('app-logo');
+  if (brand.logo) {
+    logo.src = brand.logo;
+    logo.alt = brand.org || '';
+    logo.style.display = '';
+  } else {
+    logo.style.display = 'none';
+  }
+
+  // Title
+  const titleEl = document.getElementById('app-title');
+  titleEl.textContent = [brand.org, brand.title].filter(Boolean).join(' — ') || 'SOP Generator';
+  document.title = titleEl.textContent;
+
+  // Publish modal target label
+  const targetLabel = document.getElementById('publish-target-label');
+  if (targetLabel) targetLabel.textContent = `Target: ${brand.org || config.mode}`;
 }
 
 // ── Loom fields ─────────────────────────────────────────────────────────────
@@ -211,23 +240,14 @@ async function handlePrefill() {
     if (data.title) document.getElementById('sop-title').value = data.title;
     if (data.tools_required) document.getElementById('tools-required').value = data.tools_required;
 
-    // Set dropdowns by matching the @handle (strip the @ prefix)
-    if (data.author) {
-      const key = data.author.replace(/^@/, '');
-      if (document.querySelector(`#author option[value="${key}"]`)) {
-        document.getElementById('author').value = key;
-      }
-    }
-    if (data.approver) {
-      const key = data.approver.replace(/^@/, '');
-      if (document.querySelector(`#approver option[value="${key}"]`)) {
-        document.getElementById('approver').value = key;
-      }
-    }
-    if (data.owner) {
-      const key = data.owner.replace(/^@/, '');
-      if (document.querySelector(`#owner option[value="${key}"]`)) {
-        document.getElementById('owner').value = key;
+    // Set user fields (Claude returns display names or @handles)
+    for (const field of ['author', 'approver', 'owner']) {
+      if (data[field]) {
+        const name = data[field].replace(/^@/, '');
+        // Try exact match first, then partial match
+        const exact = config.users.find(u => u.display.toLowerCase() === name.toLowerCase());
+        const partial = config.users.find(u => u.display.toLowerCase().includes(name.toLowerCase()));
+        document.getElementById(field).value = exact ? exact.display : (partial ? partial.display : name);
       }
     }
 
@@ -251,11 +271,6 @@ async function handleGenerate() {
   const status = document.getElementById('status').value || 'DRAFT';
   const rawText = document.getElementById('raw-text').value.trim();
 
-  // Collect Loom URLs
-  const loomUrls = Array.from(document.querySelectorAll('.loom-url'))
-    .map(input => input.value.trim())
-    .filter(url => url);
-
   if (!title) return toast('Title is required.', 'error');
   if (!author) return toast('Author is required.', 'error');
   if (!rawText) return toast('Please provide some input text.', 'error');
@@ -269,11 +284,10 @@ async function handleGenerate() {
       title,
       sop_id: nextId,
       author,
-      approver: approver || author,
-      owner: owner || author,
+      approver: approver || '',
+      owner: owner || '',
       tools_required: tools,
       status,
-      loom_urls: loomUrls,
       raw_text: rawText,
     });
 
@@ -362,15 +376,32 @@ async function handlePublish() {
 
   try {
     const publishAsDraft = document.getElementById('publish-as-draft').checked;
+
+    // Rebuild metadata from current form state (user may have changed fields after generation)
+    const currentMetadata = {
+      ...sopData.metadata,
+      author: document.getElementById('author').value.trim(),
+      approver: document.getElementById('approver').value.trim(),
+      owner: document.getElementById('owner').value.trim(),
+      status: document.getElementById('status').value || 'DRAFT',
+    };
+
     const result = await api('POST', '/api/publish', {
       title: sopData.title,
       markdown: sopData.markdown,
-      metadata: sopData.metadata,
+      metadata: currentMetadata,
       parent_id: parentId,
       publish_as_draft: publishAsDraft,
     });
     hidePublishModal();
     toast(`Published! <a href="${result.page_url}" target="_blank">Open in Confluence</a>`, 'success');
+
+    // Refresh the next SOP ID since we just used the current one
+    try {
+      const data = await api('GET', '/api/next-id');
+      nextId = data.next_id;
+      document.getElementById('sop-id-badge').textContent = nextId;
+    } catch (e) { /* ignore */ }
   } catch (e) {
     toast('Publish failed: ' + e.message, 'error');
   } finally {

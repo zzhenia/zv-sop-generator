@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: sop-generator
+    runtime: docker
+    envVars:
+      - key: APP_MODE
+        value: zv
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ZV_JIRA_EMAIL
+        sync: false
+      - key: ZV_JIRA_API_TOKEN
+        sync: false

@@ -3,16 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SOP Generator — ZV</title>
+  <title>SOP Generator</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div class="app">
 
   <!-- Header -->
-  <div class="app-header">
+  <div class="app-header" id="app-header">
     <div class="app-header-left">
-      <span class="app-title">ZV SOP Generator</span>
+      <img src="" alt="" class="app-logo" id="app-logo" style="display:none">
+      <span class="app-title" id="app-title">SOP Generator</span>
     </div>
     <div class="app-header-right">
       <span class="sop-id-badge" id="sop-id-badge">---</span>
@@ -36,15 +37,18 @@
         <div class="form-grid-3">
           <label class="form-label">
             Author
-            <select id="author"></select>
+            <input type="text" id="author" list="author-list" placeholder="Select or type a name" autocomplete="off">
+            <datalist id="author-list"></datalist>
           </label>
           <label class="form-label">
             Approver
-            <select id="approver"></select>
+            <input type="text" id="approver" list="approver-list" placeholder="Select or type a name" autocomplete="off">
+            <datalist id="approver-list"></datalist>
           </label>
           <label class="form-label">
             Owner
-            <select id="owner"></select>
+            <input type="text" id="owner" list="owner-list" placeholder="Select or type a name" autocomplete="off">
+            <datalist id="owner-list"></datalist>
           </label>
         </div>
         <div class="form-grid-2">
@@ -97,10 +101,6 @@
       <div class="preview-toolbar">
         <button class="btn btn-sm" data-action="download-md" id="btn-dl-md" disabled>Download .md</button>
         <button class="btn btn-sm" data-action="download-pdf" id="btn-dl-pdf" disabled>Download .pdf</button>
-        <label class="toolbar-checkbox" title="Page will not be visible until promoted from draft">
-          <input type="checkbox" id="publish-as-draft" checked>
-          Draft
-        </label>
         <button class="btn btn-sm btn-primary" data-action="publish" id="btn-publish" disabled>Publish to Confluence</button>
       </div>
       <div class="preview-container" id="preview-container">
@@ -117,10 +117,14 @@
 <div class="modal-overlay" id="publish-modal">
   <div class="modal">
     <h3>Publish to Confluence</h3>
-    <p class="modal-subtitle">Target: ZV Confluence</p>
+    <p class="modal-subtitle" id="publish-target-label">Target: ---</p>
     <label class="form-label">
       Parent Folder
       <select id="parent-folder"></select>
+    </label>
+    <label class="form-checkbox" style="display:flex;align-items:center;gap:8px;margin-top:16px;font-size:13px;cursor:pointer;">
+      <input type="checkbox" id="publish-as-draft" checked>
+      Publish as draft (page will not be visible until promoted)
     </label>
     <div class="modal-actions">
       <button class="btn" data-action="cancel-publish">Cancel</button>

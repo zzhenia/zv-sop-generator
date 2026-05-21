@@ -106,16 +106,26 @@ def date_macro(date_str):
     return date_str
 
 
-def resolve_user(name):
+def resolve_user(name, id_map=None):
     """Resolve a user name or @mention to a Confluence account ID mention.
-    Returns raw HTML for user mention, or plain text if unresolved."""
-    clean = name.strip().lstrip("@").lower()
-    if clean in KNOWN_USERS:
-        return user_mention(KNOWN_USERS[clean])
-    # Check if it looks like an account ID already
+
+    Checks (in order): account_id format, live id_map from Confluence API,
+    hardcoded KNOWN_USERS. Falls back to plain text if unresolved.
+    """
+    clean = name.strip().lstrip("@")
+    if not clean:
+        return ""
+    # Already an account ID
     if ":" in clean and len(clean) > 20:
         return user_mention(clean)
-    return name
+    # Check live id_map (display name -> account_id)
+    if id_map and clean.lower() in id_map:
+        return user_mention(id_map[clean.lower()])
+    # Check hardcoded KNOWN_USERS (short key -> account_id)
+    if clean.lower() in KNOWN_USERS:
+        return user_mention(KNOWN_USERS[clean.lower()])
+    # Unresolved — render as plain text
+    return clean
 
 
 def inline_format(text):
@@ -161,7 +171,7 @@ def md_table_to_html(lines):
     return html
 
 
-def build_control_block(metadata):
+def build_control_block(metadata, id_map=None):
     """Build the Header / Control Block as a Page Properties (details) macro."""
     rows = []
 
@@ -170,9 +180,9 @@ def build_control_block(metadata):
 
     add_row("ID", metadata.get("sop_id", ""))
     add_row("Version", metadata.get("version", "v1.0"))
-    add_row("Author", resolve_user(metadata.get("author", "")))
-    add_row("Approver", resolve_user(metadata.get("approver", "")))
-    add_row("Owner", resolve_user(metadata.get("owner", "")))
+    add_row("Author", resolve_user(metadata.get("author", ""), id_map))
+    add_row("Approver", resolve_user(metadata.get("approver", ""), id_map))
+    add_row("Owner", resolve_user(metadata.get("owner", ""), id_map))
     add_row("Status", status_badge(metadata.get("status", "DRAFT")))
     add_row("Review Date", date_macro(metadata.get("review_date", "")))
     add_row("Tools Required", inline_format(metadata.get("tools_required", "")))
@@ -236,7 +246,7 @@ def _close_lists(stack):
     return parts
 
 
-def md_to_storage_format(md_text, metadata):
+def md_to_storage_format(md_text, metadata, id_map=None):
     """Convert SOP Markdown to Confluence Storage Format (XHTML).
 
     The control block table is detected and replaced with the Page Properties
@@ -278,7 +288,7 @@ def md_to_storage_format(md_text, metadata):
         # ── Detect and replace the control block table ───────────────
         if stripped == "## Header / Control Block":
             html_parts.append("<h2>Header / Control Block</h2>")
-            html_parts.append(build_control_block(metadata))
+            html_parts.append(build_control_block(metadata, id_map))
             # Skip until next --- or ## heading
             i += 1
             while i < len(lines):

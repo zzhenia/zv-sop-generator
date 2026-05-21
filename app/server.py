@@ -18,12 +18,13 @@ from fastapi.staticfiles import StaticFiles
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-ROOT_DIR = Path(__file__).resolve().parent
-STATIC_DIR = ROOT_DIR / "static"
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
+SOP_DIR = APP_DIR.parent  # actions/on-demand/sop-generator
 
 # ── Import existing modules ──────────────────────────────────────────────────
 
-sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(SOP_DIR))
 from fetch_loom_transcript import (
     extract_video_id,
     fetch_json_transcript,
@@ -39,6 +40,7 @@ from publish_sop_to_confluence import (
     create_page,
     find_space_id,
     get_auth,
+    load_env,
     md_to_storage_format,
 )
 
@@ -47,22 +49,47 @@ from publish_sop_to_confluence import (
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("sop-app")
 
-# ── Credentials ──────────────────────────────────────────────────────────────
-# Read from environment variables (set in Railway dashboard or .env locally)
+# ── App mode ─────────────────────────────────────────────────────────────────
+# APP_MODE controls branding and which Confluence instance to use.
+# "pi" = Pilot Institute (Railway), "zv" = Personal (Render)
 
-_env = {
-    "ZV_JIRA_EMAIL": os.environ.get("ZV_JIRA_EMAIL", ""),
-    "ZV_JIRA_API_TOKEN": os.environ.get("ZV_JIRA_API_TOKEN", ""),
-    "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
+APP_MODE = os.environ.get("APP_MODE", "pi")
+
+BRAND = {
+    "pi": {
+        "title": "SOP Generator",
+        "org": "Pilot Institute",
+        "logo": "/static/PI_logo_hor-light.svg",
+        "header_color": "#0747A6",
+        "sop_prefix": "PI-SOP",
+    },
+    "zv": {
+        "title": "SOP Generator",
+        "org": "ZV",
+        "logo": "",
+        "header_color": "#253858",
+        "sop_prefix": "ZV-SOP",
+    },
 }
 
-ZV = INSTANCES["zv"]
-ZV_AUTH = get_auth(_env, ZV)
+# ── Credentials ──────────────────────────────────────────────────────────────
+# Try config/keys.env first (local dev), fall back to OS environment (deployed)
+
+try:
+    _env = load_env()
+except SystemExit:
+    log.info("No keys.env found, reading credentials from environment variables.")
+    _env = {}
+    for key in os.environ:
+        _env[key] = os.environ[key]
+
+ACTIVE_INSTANCE = INSTANCES[APP_MODE]
+ACTIVE_AUTH = get_auth(_env, ACTIVE_INSTANCE)
 ANTHROPIC_KEY = _env.get("ANTHROPIC_API_KEY", "")
 
 # ── Load template + system prompt at startup ─────────────────────────────────
 
-TEMPLATE_MD = (ROOT_DIR / "sop_template.md").read_text()
+TEMPLATE_MD = (SOP_DIR / "sop_template.md").read_text()
 
 # Extract the Role and Writing style sections for the system prompt
 SYSTEM_PROMPT = """You are a thoughtful and methodical SOP Assistant who combines strategic clarity with user-focused design thinking. You approach every SOP request with professionalism and curiosity. You communicate with honesty and precision.
@@ -71,17 +98,95 @@ Writing style: Clear, structured, and practical. Apply principles from On Writin
 
 You must generate a complete SOP in Markdown format following the template structure provided. Return ONLY the Markdown content inside a fenced code block. Do not include any commentary outside the code block."""
 
-# ── Known ZV parent folders ──────────────────────────────────────────────────
+# ── Parent folders per mode ──────────────────────────────────────────────────
 
-ZV_PARENT_FOLDERS = {
-    "SOP (root)": "1201668108",
+PARENT_FOLDERS = {
+    "pi": {
+        "SOP Catalogue (root)": "187269135",
+        "Training Team": "124223489",
+        "Organic Content": "30015499",
+        "Course Content": "118358029",
+    },
+    "zv": {
+        "SOPs (root)": "1397424130",
+    },
 }
 
-# ── Reverse user lookup ─────────────────────────────────────────────────────
+# ── User cache ──────────────────────────────────────────────────────────────
 
-USER_DISPLAY = {
-    "zhenia": "Zhenia Vasiliev",
-}
+_user_cache = {"users": [], "id_map": {}, "expires": 0}
+
+
+def _fetch_confluence_users():
+    """Fetch all users from the active Confluence instance, cached for 30 min."""
+    now = time.time()
+    if _user_cache["users"] and now < _user_cache["expires"]:
+        return _user_cache["users"], _user_cache["id_map"]
+
+    base = ACTIVE_INSTANCE["base"]
+    users = []
+    id_map = {}  # lowercase display name -> account_id
+
+    # Try the confluence-users group first, fall back to site-admins
+    for group in ["confluence-users", "site-admins"]:
+        start = 0
+        while True:
+            try:
+                resp = requests.get(
+                    f"{base}/rest/api/group/{group}/member",
+                    auth=ACTIVE_AUTH,
+                    params={"limit": 200, "start": start},
+                )
+                if not resp.ok:
+                    break
+                data = resp.json()
+                results = data.get("results", [])
+                for u in results:
+                    account_id = u.get("accountId", "")
+                    display = u.get("displayName", "")
+                    if not display or not account_id:
+                        continue
+                    # Skip app/bot accounts
+                    if u.get("accountType") == "app":
+                        continue
+                    if display not in [x["display"] for x in users]:
+                        users.append({
+                            "display": display,
+                            "account_id": account_id,
+                        })
+                        id_map[display.lower()] = account_id
+                size = data.get("size", len(results))
+                if len(results) < 200:
+                    break
+                start += size
+            except Exception as e:
+                log.warning("Failed to fetch group %s: %s", group, e)
+                break
+        if users:
+            break
+
+    # Merge in KNOWN_USERS as fallback (in case the API missed anyone)
+    known_display = {
+        "zhenia": "Zhenia Vasiliev",
+        "roberto": "Roberto Castillejo",
+        "jesse": "Jesse Ekkerd",
+        "greg": "Greg Reverdiau",
+        "ben": "Ben Pitroff",
+    }
+    for key, display in known_display.items():
+        if display.lower() not in id_map and key in KNOWN_USERS:
+            users.append({"display": display, "account_id": KNOWN_USERS[key]})
+            id_map[display.lower()] = KNOWN_USERS[key]
+
+    # Sort alphabetically by display name
+    users.sort(key=lambda u: u["display"].lower())
+
+    _user_cache["users"] = users
+    _user_cache["id_map"] = id_map
+    _user_cache["expires"] = now + 1800  # 30 min cache
+    log.info("Loaded %d Confluence users for %s", len(users), APP_MODE)
+    return users, id_map
+
 
 # ── Next-ID cache ───────────────────────────────────────────────────────────
 
@@ -97,31 +202,51 @@ def _query_next_sop_id():
     if _next_id_cache["value"] and now < _next_id_cache["expires"]:
         return _next_id_cache["value"]
 
-    base = ZV["base"]
-    resp = requests.get(
-        f"{base}/rest/api/content/search",
-        auth=ZV_AUTH,
-        params={"cql": 'label = "sop-metadata"', "limit": 50},
-    )
-    resp.raise_for_status()
+    base = ACTIVE_INSTANCE["base"]
     ids = []
-    for r in resp.json().get("results", []):
-        pr = requests.get(
-            f"{base}/api/v2/pages/{r['id']}",
-            auth=ZV_AUTH,
-            params={"body-format": "storage"},
-        )
-        if pr.ok:
-            body = pr.json().get("body", {}).get("storage", {}).get("value", "")
-            m = re.search(r"ZV-SOP-(\d+)", body)
-            if m:
-                ids.append(int(m.group(1)))
 
+    # Search both current and draft pages with the sop-metadata label
+    for status in ["current", "draft"]:
+        start = 0
+        while True:
+            cql = f'label = "sop-metadata" and status = "{status}"'
+            resp = requests.get(
+                f"{base}/rest/api/content/search",
+                auth=ACTIVE_AUTH,
+                params={"cql": cql, "limit": 50, "start": start},
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            if not results:
+                break
+            for r in results:
+                pr = requests.get(
+                    f"{base}/api/v2/pages/{r['id']}",
+                    auth=ACTIVE_AUTH,
+                    params={"body-format": "storage"},
+                )
+                if pr.ok:
+                    body = pr.json().get("body", {}).get("storage", {}).get("value", "")
+                    prefix = BRAND.get(APP_MODE, BRAND["pi"])["sop_prefix"]
+                    m = re.search(rf"{prefix}-(\d+)", body)
+                    if m:
+                        ids.append(int(m.group(1)))
+            if len(results) < 50:
+                break
+            start += 50
+
+    prefix = BRAND.get(APP_MODE, BRAND["pi"])["sop_prefix"]
     next_num = max(ids) + 1 if ids else 1
-    result = f"ZV-SOP-{next_num:03d}"
+    result = f"{prefix}-{next_num:03d}"
     _next_id_cache["value"] = result
     _next_id_cache["expires"] = now + 300  # 5 min cache
     return result
+
+
+def _invalidate_next_id_cache():
+    """Clear the next-ID cache so the next query fetches fresh data."""
+    _next_id_cache["value"] = None
+    _next_id_cache["expires"] = 0
 
 
 def confluence_html_to_preview(storage_html):
@@ -150,11 +275,19 @@ def confluence_html_to_preview(storage_html):
     # User mentions
     def replace_user(m):
         account_id = m.group(1)
-        # Reverse lookup
+        # Check cached Confluence users first
+        cached_users = _user_cache.get("users", [])
+        for u in cached_users:
+            if u["account_id"] == account_id:
+                return f'<span class="mention">@{u["display"]}</span>'
+        # Fall back to KNOWN_USERS
+        known_display = {
+            "zhenia": "Zhenia Vasiliev", "roberto": "Roberto Castillejo",
+            "jesse": "Jesse Ekkerd", "greg": "Greg Reverdiau", "ben": "Ben Pitroff",
+        }
         for name, aid in KNOWN_USERS.items():
             if aid == account_id:
-                display = USER_DISPLAY.get(name, f"@{name}")
-                return f'<span class="mention">@{display}</span>'
+                return f'<span class="mention">@{known_display.get(name, name)}</span>'
         return f'<span class="mention">@user</span>'
 
     html = re.sub(
@@ -212,73 +345,14 @@ def index():
 
 @app.get("/api/config")
 def get_config():
+    users, _ = _fetch_confluence_users()
     return {
-        "users": [
-            {"key": k, "display": USER_DISPLAY.get(k, k)} for k in KNOWN_USERS
-        ],
+        "mode": APP_MODE,
+        "brand": BRAND.get(APP_MODE, BRAND["pi"]),
+        "users": users,
         "statuses": list(STATUS_COLOURS.keys()),
-        "parent_folders": ZV_PARENT_FOLDERS,
+        "parent_folders": PARENT_FOLDERS.get(APP_MODE, {}),
     }
-
-
-SOPS_ROOT_ID = "1201668108"  # "SOP" page in ZV Confluence
-
-_folder_cache = {"tree": None, "expires": 0}
-
-
-def _fetch_folder_tree():
-    """Fetch the full folder tree under the SOPs root from Confluence."""
-    now = time.time()
-    if _folder_cache["tree"] and now < _folder_cache["expires"]:
-        return _folder_cache["tree"]
-
-    base = ZV["base"]
-
-    def get_child_folders(page_id, depth=0):
-        """Recursively get child pages using the v1 child/page endpoint."""
-        resp = requests.get(
-            f"{base}/rest/api/content/{page_id}/child/page",
-            auth=ZV_AUTH,
-            params={"limit": 50},
-        )
-        if not resp.ok:
-            return []
-        children = sorted(resp.json().get("results", []), key=lambda x: x["title"])
-        results = []
-        for page in children:
-            indent = "\u2003" * depth  # em-space for visual indent
-            prefix = "└ " if depth > 0 else ""
-            results.append({
-                "id": page["id"],
-                "title": page["title"],
-                "label": f"{indent}{prefix}{page['title']}",
-                "depth": depth,
-            })
-            if depth < 4:
-                results.extend(get_child_folders(page["id"], depth + 1))
-        return results
-
-    tree = [{
-        "id": SOPS_ROOT_ID,
-        "title": "SOPs (root)",
-        "label": "SOPs (root)",
-        "depth": 0,
-    }]
-    tree.extend(get_child_folders(SOPS_ROOT_ID, 1))
-
-    _folder_cache["tree"] = tree
-    _folder_cache["expires"] = now + 600  # 10 min cache
-    return tree
-
-
-@app.get("/api/folders")
-def get_folders():
-    try:
-        return _fetch_folder_tree()
-    except Exception as e:
-        log.error("Failed to fetch folder tree: %s", e)
-        return [{"id": v, "title": k, "label": k, "depth": 0}
-                for k, v in ZV_PARENT_FOLDERS.items()]
 
 
 @app.get("/api/next-id")
@@ -354,15 +428,16 @@ def extract_metadata(body: dict):
     if not ANTHROPIC_KEY:
         raise HTTPException(500, "ANTHROPIC_API_KEY not configured.")
 
-    known_names = ", ".join(f"@{k}" for k in KNOWN_USERS)
+    users, _ = _fetch_confluence_users()
+    user_names = ", ".join(u["display"] for u in users)
     prompt = f"""Extract the following SOP metadata from the text below. Return ONLY a JSON object with these fields:
 - "title": a concise descriptive title for this SOP (do not include "[SOP]" prefix)
-- "author": the person writing or presenting this process (use one of: {known_names}, or leave empty)
-- "approver": the person who would approve this (use one of: {known_names}, or leave empty)
-- "owner": the person or team responsible for maintaining this process (use one of: {known_names}, or leave empty)
+- "author": the person writing or presenting this process (use one of: {user_names}, or leave empty)
+- "approver": the person who would approve this (use one of: {user_names}, or leave empty)
+- "owner": the person or team responsible for maintaining this process (use one of: {user_names}, or leave empty)
 - "tools_required": comma-separated list of tools/software mentioned (e.g. "Asana, Slack, Google Sheets")
 
-If a field cannot be determined, use an empty string. For author/approver/owner, return just the @handle (e.g. "@zhenia"), not the full name.
+If a field cannot be determined, use an empty string. Return the full display name (e.g. "Jesse Ekkerd"), not a handle.
 
 Text:
 {raw_text[:4000]}"""
@@ -401,7 +476,6 @@ def generate_sop(body: dict):
     owner = body.get("owner", "")
     tools = body.get("tools_required", "")
     status = body.get("status", "DRAFT")
-    loom_urls = body.get("loom_urls", [])
     raw_text = body.get("raw_text", "")
     review_date = body.get("review_date", "")
 
@@ -416,13 +490,13 @@ def generate_sop(body: dict):
     metadata = {
         "sop_id": sop_id,
         "version": "v1.0",
-        "author": f"@{author}",
-        "approver": f"@{approver}",
-        "owner": f"@{owner}",
+        "author": author,
+        "approver": approver,
+        "owner": owner,
         "status": status,
         "review_date": review_date,
         "tools_required": tools,
-        "loom_explainers": ", ".join(loom_urls),
+        "loom_explainers": "",
     }
 
     user_prompt = f"""Generate a complete SOP using the following template structure:
@@ -433,9 +507,9 @@ Metadata for the Header / Control Block:
 - SOP ID: {sop_id}
 - Title: {title}
 - Version: v1.0
-- Author: @{author}
-- Approver: @{approver}
-- Owner: @{owner}
+- Author: {author}
+- Approver: {approver}
+- Owner: {owner}
 - Status: {status}
 - Review Date: {review_date}
 - Tools Required: {tools}
@@ -443,11 +517,6 @@ Metadata for the Header / Control Block:
 Raw input material (transcripts, notes, and process descriptions):
 
 {raw_text}
-
-IMPORTANT:
-- Today's date is {date.today().isoformat()}. Use this as the date in the Version History table.
-- Do NOT include an H1 title at the top -- the page title is set separately.
-- Start directly with ## Header / Control Block.
 
 Generate a complete, well-structured SOP based on this material. Follow the template exactly. Include all sections: Purpose, Scope, Roles and Responsibilities, Review and Approval, Procedure (with numbered steps), Checklist (with checkbox items), and Review and Maintenance with a Version History table. Return ONLY the Markdown inside a fenced code block."""
 
@@ -472,7 +541,8 @@ Generate a complete, well-structured SOP based on this material. Follow the temp
     markdown = md_match.group(1).strip() if md_match else raw_response.strip()
 
     # Generate HTML preview
-    storage_html = md_to_storage_format(markdown, metadata)
+    _, id_map = _fetch_confluence_users()
+    storage_html = md_to_storage_format(markdown, metadata, id_map)
     preview_html = confluence_html_to_preview(storage_html)
 
     return {
@@ -496,13 +566,15 @@ def publish_sop(body: dict):
         raise HTTPException(400, "Title, markdown, and parent_id are required.")
 
     try:
-        storage_html = md_to_storage_format(markdown, metadata)
-        space_id = find_space_id(ZV_AUTH, ZV["base"], ZV["space_key"])
+        _, id_map = _fetch_confluence_users()
+        storage_html = md_to_storage_format(markdown, metadata, id_map)
+        space_id = find_space_id(ACTIVE_AUTH, ACTIVE_INSTANCE["base"], ACTIVE_INSTANCE["space_key"])
         page_id, page_url = create_page(
-            ZV_AUTH, ZV["base"], space_id, title, storage_html, parent_id,
+            ACTIVE_AUTH, ACTIVE_INSTANCE["base"], space_id, title, storage_html, parent_id,
             draft=publish_as_draft,
         )
-        add_label(ZV_AUTH, ZV["base"], page_id, "sop-metadata")
+        add_label(ACTIVE_AUTH, ACTIVE_INSTANCE["base"], page_id, "sop-metadata")
+        _invalidate_next_id_cache()
     except SystemExit as e:
         raise HTTPException(500, str(e))
     except Exception as e:
@@ -573,4 +645,4 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("PORT", 8002))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
